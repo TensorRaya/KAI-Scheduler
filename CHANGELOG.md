@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- Count a physical GPU shared by several pods through one DRA ResourceClaim (`status.reservedFor` with more than one entry) once per node instead of once per consuming pod. Per-task accounting added the device for every consumer, so on a node whose shared device pushed the used GPU count above physical capacity, `IdleVector` went negative and the node became unschedulable for every task — including GPU-less ones — surfacing as a misleading "didn't have enough resources: GPUs" message. [#ISSUE](https://github.com/kai-scheduler/KAI-Scheduler/issues/ISSUE)
+
 ## [v0.16.4] - 2026-07-12
 
 ### Added

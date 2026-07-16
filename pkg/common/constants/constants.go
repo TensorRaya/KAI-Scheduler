@@ -9,6 +9,7 @@ const (
 	AppLabelName              = "app"
 	NvidiaGpuResource         = "nvidia.com/gpu"
 	NvidiaGpuMemory           = "nvidia.com/gpu.memory"
+	NvidiaGpuDraDriver        = "gpu.nvidia.com"
 	NvidiaMigResourcePrefix   = "nvidia.com/mig-"
 	GpuResource               = "gpu"
 	UnlimitedResourceQuantity = float64(-1)
