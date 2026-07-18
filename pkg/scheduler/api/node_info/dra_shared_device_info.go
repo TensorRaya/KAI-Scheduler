@@ -6,19 +6,10 @@ package node_info
 import (
 	resourceapi "k8s.io/api/resource/v1"
 
-	commonconstants "github.com/kai-scheduler/KAI-scheduler/pkg/common/constants"
+	"github.com/kai-scheduler/KAI-scheduler/pkg/common/resources"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/pod_info"
 	"github.com/kai-scheduler/KAI-scheduler/pkg/scheduler/api/resource_info"
 )
-
-// A single physical DRA device may be shared by several pods through one
-// ResourceClaim with more than one entry in status.reservedFor. Each such pod
-// carries the same allocated device in its ResourceClaimInfo, so counting the
-// device once per pod (the naive per-task accounting) inflates the node's used
-// GPU count above physical capacity and drives IdleVector negative, making the
-// whole node unschedulable. draSharedDeviceRefCount tracks how many pods on the
-// node currently reference each allocated device (keyed by driver/pool/device)
-// so a shared device contributes to UsedVector exactly once.
 
 // draDeviceKey uniquely identifies a physical DRA device on the node.
 func draDeviceKey(result resourceapi.DeviceRequestAllocationResult) string {
@@ -35,7 +26,7 @@ func (ni *NodeInfo) allocatedGPUDeviceKeys(task *pod_info.PodInfo) []string {
 			continue
 		}
 		for _, result := range claimAllocation.Allocation.Devices.Results {
-			if !isGPUDRADriver(result.Driver) {
+			if !resources.IsGPUDeviceClass(result.Driver) {
 				continue
 			}
 			keys = append(keys, draDeviceKey(result))
@@ -44,11 +35,18 @@ func (ni *NodeInfo) allocatedGPUDeviceKeys(task *pod_info.PodInfo) []string {
 	return keys
 }
 
-// isGPUDRADriver reports whether the DRA driver name belongs to an NVIDIA GPU
-// device. The device-class name is not present on the allocation result, so the
-// driver name is used instead.
-func isGPUDRADriver(driver string) bool {
-	return driver == commonconstants.NvidiaGpuDraDriver
+// sharedDRAGpuDiscount returns the number of GPU devices the task requests via
+// DRA claims that are already counted on this node for other pods. A task that
+// shares an allocated device with a running pod does not need additional GPU
+// capacity for that device.
+func (ni *NodeInfo) sharedDRAGpuDiscount(task *pod_info.PodInfo) float64 {
+	discount := 0.0
+	for _, key := range ni.allocatedGPUDeviceKeys(task) {
+		if ni.DRASharedDeviceRefCount[key] > 0 {
+			discount++
+		}
+	}
+	return discount
 }
 
 // dedupSharedDRAGpus removes from resourcesToTrack the GPU count that would
@@ -56,6 +54,15 @@ func isGPUDRADriver(driver string) bool {
 // node. It also updates the node's per-device reference count. It must be
 // called once per addTaskResources, before the vector is added to UsedVector.
 func (ni *NodeInfo) dedupSharedDRAGpus(task *pod_info.PodInfo, resourcesToTrack resource_info.ResourceVector) {
+	current := resourcesToTrack.Get(resource_info.GPUIndex)
+	if current <= 0 {
+		// The task contributes no GPUs to the used vector (e.g. a resource
+		// reservation task whose GPU index was zeroed). Tracking its devices
+		// would both risk a negative deduction below and mask the reference
+		// count of the real consuming pods, so leave the accounting untouched.
+		return
+	}
+
 	alreadyCounted := 0.0
 	for _, key := range ni.allocatedGPUDeviceKeys(task) {
 		if ni.DRASharedDeviceRefCount[key] > 0 {
@@ -66,8 +73,11 @@ func (ni *NodeInfo) dedupSharedDRAGpus(task *pod_info.PodInfo, resourcesToTrack 
 		ni.DRASharedDeviceRefCount[key]++
 	}
 
+	if alreadyCounted > current {
+		// Never deduct more than the task's own GPU contribution.
+		alreadyCounted = current
+	}
 	if alreadyCounted > 0 {
-		current := resourcesToTrack.Get(resource_info.GPUIndex)
 		resourcesToTrack.Set(resource_info.GPUIndex, current-alreadyCounted)
 	}
 }
@@ -77,6 +87,13 @@ func (ni *NodeInfo) dedupSharedDRAGpus(task *pod_info.PodInfo, resourcesToTrack 
 // remain referenced by other pods (and were therefore never subtracted on this
 // task's removal path). It must be called once per removeTaskResources.
 func (ni *NodeInfo) releaseSharedDRAGpus(task *pod_info.PodInfo, resourcesToTrack resource_info.ResourceVector) {
+	current := resourcesToTrack.Get(resource_info.GPUIndex)
+	if current <= 0 {
+		// Mirror of dedupSharedDRAGpus: a task that contributed no GPUs never
+		// incremented the reference count, so it must not decrement it here.
+		return
+	}
+
 	stillShared := 0.0
 	for _, key := range ni.allocatedGPUDeviceKeys(task) {
 		if ni.DRASharedDeviceRefCount[key] > 1 {
@@ -93,8 +110,11 @@ func (ni *NodeInfo) releaseSharedDRAGpus(task *pod_info.PodInfo, resourcesToTrac
 		}
 	}
 
+	if stillShared > current {
+		// Never add back more than the task's own GPU contribution.
+		stillShared = current
+	}
 	if stillShared > 0 {
-		current := resourcesToTrack.Get(resource_info.GPUIndex)
 		resourcesToTrack.Set(resource_info.GPUIndex, current-stillShared)
 	}
 }

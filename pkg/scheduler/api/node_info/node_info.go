@@ -745,6 +745,13 @@ func (ni *NodeInfo) lessEqualTaskToNodeResources(
 	if !ni.isValidGpuPortion(&task.GpuRequirement) {
 		return false
 	}
+	// A task sharing an already-counted DRA device does not need additional
+	// GPU capacity for that device.
+	if discount := ni.sharedDRAGpuDiscount(task); discount > 0 {
+		adjusted := nodeResourcesVector.Clone()
+		adjusted.Set(resource_info.GPUIndex, adjusted.Get(resource_info.GPUIndex)+discount)
+		return task.ResReqVector.LessEqual(adjusted)
+	}
 	return task.ResReqVector.LessEqual(nodeResourcesVector)
 }
 
